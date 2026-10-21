@@ -1,8 +1,9 @@
 import json
 import logging
 import os
+import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.wahoo_client import WahooClient
 
 logger = logging.getLogger("wahoo_connector.sync")
@@ -132,22 +133,54 @@ def get_all_activities() -> list:
     activities.sort(key=lambda x: x.get("starts", ""), reverse=True)
     return activities
 
+# Relative windows: "<N>_<unit>", e.g. 1_day, 2_weeks, 3_months, 1_year.
+# Separator may be "_", "-", a space, or omitted ("2weeks"). Month = 30 days, year = 365 days.
+_RELATIVE_WINDOW_RE = re.compile(r"^(\d+)[_\-\s]?(day|week|month|year)s?$")
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+
 def get_cutoff_datetime(time_window: str):
-    """Calculate datetime cutoff based on selected time window."""
-    if not time_window or time_window == "all_time":
+    """
+    Calculate the (naive, UTC) datetime cutoff for a time window.
+
+    Accepted values:
+      - "" / "all_time"              -> None (no cutoff, full sync)
+      - "<N>_<unit>"                 -> relative window, unit = day(s), week(s), month(s), year(s)
+                                        e.g. "1_day", "1_week", "2_weeks", "3_months", "1_year"
+      - "YYYY-MM-DD"                 -> everything from that date (00:00 UTC) onwards
+      - ISO 8601 datetime            -> everything from that moment onwards
+                                        (timezone-aware values are converted to UTC)
+
+    Raises ValueError for anything else, so a typo never silently turns into a full sync.
+    """
+    if time_window is None:
+        return None
+
+    raw = str(time_window).strip()
+    value = raw.lower()
+    if value in ("", "all_time"):
         return None
 
     now = datetime.utcnow()
-    if time_window == "1_day":
-        return now - timedelta(days=1)
-    elif time_window == "1_week":
-        return now - timedelta(days=7)
-    elif time_window == "1_month":
-        return now - timedelta(days=30)
-    elif time_window == "1_year":
-        return now - timedelta(days=365)
 
-    return None
+    match = _RELATIVE_WINDOW_RE.match(value)
+    if match:
+        amount = int(match.group(1))
+        if amount < 1:
+            raise ValueError(f"Invalid sync time window '{raw}': amount must be at least 1.")
+        return now - timedelta(days=amount * _UNIT_DAYS[match.group(2)])
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"Invalid sync time window '{raw}'. Use all_time, a relative window such as "
+            f"1_day / 1_week / 2_weeks / 3_months / 1_year, or a date such as 2025-01-31."
+        ) from None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 def extract_fit_url(workout: dict) -> str:
     """Extract .FIT download URL from various possible fields in Wahoo workout response."""
@@ -171,7 +204,8 @@ def perform_sync(time_window: str = None) -> dict:
     Main sync logic with Time Selector filtering (defaults to 1_week):
     1. Verify / refresh tokens
     2. Fetch workouts from Wahoo API in DESCENDING order (newest first)
-    3. Filter by selected time window (1_day, 1_week, 1_month, 1_year, all_time)
+    3. Filter by selected time window (all_time, "<N>_days/weeks/months/years", or a start date
+       like 2025-01-31; see get_cutoff_datetime)
     4. Check local history & disk for deduplication
     5. Download missing FIT files
     """
@@ -215,7 +249,11 @@ def perform_sync(time_window: str = None) -> dict:
     history = load_history()
     downloaded_map = history.get("downloaded", {})
 
-    cutoff_dt = get_cutoff_datetime(time_window)
+    try:
+        cutoff_dt = get_cutoff_datetime(time_window)
+    except ValueError as e:
+        logger.error(str(e))
+        return {"status": "error", "message": str(e)}
     if cutoff_dt:
         logger.info(f"Filtering sync to time window: {time_window} (Cutoff: {cutoff_dt.isoformat()}Z)")
 

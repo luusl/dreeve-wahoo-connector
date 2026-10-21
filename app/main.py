@@ -451,8 +451,10 @@ HTML_TEMPLATE = """
                             <option value="1_week" selected>1 Week (Last 7 Days)</option>
                             <option value="1_month">1 Month (Last 30 Days)</option>
                             <option value="1_year">1 Year (Last 365 Days)</option>
+                            <option value="custom">Since a specific date&hellip;</option>
                             <option value="all_time">All Time (Full Sync)</option>
                         </select>
+                        <input type="date" id="time-window-date" class="time-select" style="display: none;">
                     </div>
 
                     <div class="actions">
@@ -583,7 +585,15 @@ HTML_TEMPLATE = """
             const spinner = document.getElementById('btn-spinner');
             const btnText = document.getElementById('btn-text');
             const timeSelect = document.getElementById('time-window-select');
-            const timeWindow = timeSelect ? timeSelect.value : '1_week';
+            const dateInput = document.getElementById('time-window-date');
+            let timeWindow = timeSelect ? timeSelect.value : '1_week';
+            if (timeWindow === 'custom') {
+                timeWindow = dateInput ? dateInput.value : '';
+                if (!timeWindow) {
+                    alert('Please pick a start date first.');
+                    return;
+                }
+            }
 
             if (btn) btn.disabled = true;
             if (spinner) spinner.style.display = 'inline-block';
@@ -604,6 +614,14 @@ HTML_TEMPLATE = """
                 if (spinner) spinner.style.display = 'none';
                 if (btnText) btnText.innerText = 'Sync Now';
             }
+        }
+
+        const timeWindowSelect = document.getElementById('time-window-select');
+        if (timeWindowSelect) {
+            timeWindowSelect.addEventListener('change', () => {
+                const dateInput = document.getElementById('time-window-date');
+                if (dateInput) dateInput.style.display = timeWindowSelect.value === 'custom' ? '' : 'none';
+            });
         }
 
         // Live status polling every 3 seconds
